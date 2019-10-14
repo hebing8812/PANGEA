@@ -24,12 +24,14 @@ R packages: elasticnet, hdi
    ```Format: [Patient ID]\t[BP1-Chr]\t[Position]\t[Strand]\t[BP2-Chr]\t[Position]\t[Strand]\n```
 
 # Usage
- ```perl PANGEA.pl 
- -d [Path to PANGEA directroy]
- -n [gene name] 
- -g [gene expression] 
- -p [list of patient] 
- -e [EP pairs]
- -a [SNV]
- -b [TRAN/INV] 
- -c [CNV]```
+ ```
+ perl PANGEA.pl 
+    -d [Path to PANGEA directroy]
+    -n [gene name] 
+    -g [gene expression] 
+    -p [list of patient] 
+    -e [EP pairs]
+    -a [SNV]
+    -b [TRAN/INV] 
+    -c [CNV]
+ ```
