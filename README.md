@@ -2,7 +2,7 @@ Predictive Analysis of Noncoding Genomic Alterations
 
 # Input Files
 1) Gene expression in patients.
-   ``Format: [Patient ID]\t[FPKM]\n
+   ```Format: [Patient ID]\t[FPKM]\n```
 2) EP pairs.
    Format: <Enh-Chr>\t<Enh-Start>\t<Enh-End>\t<Pro-Chr>\t<Pro-Position>\t<Gene>\n
 3) Patient IDs.
