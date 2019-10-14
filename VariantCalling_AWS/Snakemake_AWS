@@ -1,0 +1,260 @@
+import os
+import csv
+import shutil
+
+hmsg = """
+In order to work with this Snakefile, there are several Python packages you need to install on your
+local machine:
+  1. pip install cfncluster
+  2. pip install s3cmd
+
+The binaries where these packages are installed must be exported in your .bashrc.
+
+You also need to update your .bashrc with your AWS credentials with access to s3 buckets managed 
+by risaws at CHOP.
+
+  export AWS_ACCESS_KEY_ID=your_access_aws_id
+  export AWS_SECRET_ACCESS_KEY=your_access_aws_key
+
+Finally, three key files are needed, one for interacting with the head node in AWS, one for 
+downloading data from cghub, and one credentials file needed to interact with Cavatica. These files should 
+be copied to
+
+  configs/cfncluster/target-wgs.pem
+  configs/cghub/cghub.key
+  configs/s4cmd/credentials.key
+
+Key files should always be kept locally and should not be uploaded to any repository, even private repo.
+
+Rules:
+  # start an AWS cluster
+  snakemake start_cluster
+
+  # run workflow
+  snakemake run --config cluster_ip=<head_node_ip_address>
+
+  # stop a running AWS cluster
+  snakemake stop_cluster
+"""
+
+# define resources for reference
+ref_fa_gzipped_url = 'ftp://ftp.ncbi.nlm.nih.gov/genomes/archive/old_genbank/Eukaryotes/vertebrates_mammals/Homo_sapiens/GRCh37/special_requests/GRCh37-lite.fa.gz'
+ref_fa_gzipped = '/'.join(['shared', os.path.basename(ref_fa_gzipped_url)])
+ref_fa = os.path.splitext(ref_fa_gzipped)[0]
+ref_fai = ref_fa + '.fai'
+ref_regions = ref_fa + '.regions'
+ref_regions_len = 100000
+
+# define resources for AML metadata
+target_wgs_aml_metadata = 'target_aml_wgs_metadata.txt'
+
+def get_sample_uuids():
+	"""
+	Return cghub whole-genome sample UUIDs.
+	"""
+	# 1-sample pilot run
+	#return [x['analysis_id'] for x in csv.DictReader(open(os.path.basename(target_wgs_aml_metadata), 'r'), delimiter='\t')][0:1]
+
+	# 5-sample pilot run
+	#return [x['analysis_id'] for x in csv.DictReader(open(os.path.basename(target_wgs_aml_metadata), 'r'), delimiter='\t')][0:5]
+
+	# 10-sample pilot run
+	#return [x['analysis_id'] for x in csv.DictReader(open(os.path.basename(target_wgs_aml_metadata), 'r'), delimiter='\t')][0:10]
+
+	# run remaining
+	return [x['analysis_id'] for x in csv.DictReader(open(os.path.basename(target_wgs_aml_metadata), 'r'), delimiter='\t')][10:]
+
+# configure snakemake shell
+shell.prefix("source ~/.bashrc; set -euo pipefail;")
+
+rule print_help:
+	"""
+	Default rule.
+	Print help message.
+	"""
+	run:
+		print(hmsg)
+
+rule run:
+	"""
+	Run WGS workflow.
+
+	cluster_ip must be provided via --config.
+	"""
+	input:
+		pem_key = 'configs/cfncluster/target-wgs.pem',
+		cghub_key = 'configs/cghub/cghub.key',
+		credentials_key = 'configs/s4cmd/credentials.key',
+		target_wgs_aml_metadata = target_wgs_aml_metadata
+	run:
+		# configure hostname
+		# cluster_ip must be provided via --config in snakemake
+		remote_addr = '@'.join(['centos', config['cluster_ip']])
+
+		# upload required run files to head node and run snakemake
+		shell("scp -i {input.pem_key} Snakefile {input.target_wgs_aml_metadata} {remote_addr}:/home/centos")
+		shell("scp -i {input.pem_key} {input.cghub_key} {input.credentials_key} {remote_addr}:/shared")
+
+		# transfer logs for previously completed uuid samples
+		shell("ssh -i {input.pem_key} {remote_addr} \"s3cmd --force get s3://chop-aws-genomics/TARGET/run_logs/wgs/completed/* /home/centos/shared/completed/\"")
+		shell("ssh -i {input.pem_key} {remote_addr} \"find /home/centos/shared/completed/ -exec touch {{}} \+\"")
+
+		# run snakemake
+		sm_max_jobs = len(get_sample_uuids()) + 1
+		shell("ssh -n -f -i {input.pem_key} {remote_addr} \"nohup snakemake run_wgs --keep-going --jobs {sm_max_jobs} --cluster 'qsub -pe smp {{threads}}' > run.log 2>&1 &\"")
+
+rule run_wgs:
+	"""
+	Run whole-genome analytical workflow, including staging from cghub, calling SNPs, structural variants, 
+	and copy number variants.
+	"""
+	input: expand('shared/completed/{uuid}', uuid=get_sample_uuids())
+
+rule wgs:
+	"""
+	Implement whole-genome analytical workflow.
+
+	Although multiple applications are best represented in individual rule within a Snakemake workflow, 
+	we put everything together in the same rule because we are staging really big data from cghub without 
+	involving s3 as an intermediate storage. We also opt not to use EBS.
+
+	This workflow uses only the ephameral storage during computation. The staging procedure can run a 
+	couple of hours for a well covered whole-genome sample and once the bam file is sitting in ephameral, 
+	several applications will run in serial and the source bam will be deleted once computation is done. 
+	The results, which are much smaller in size, will then be uploaded to s3.
+
+	In addition, due to limited storage in ephameral, each compute node can only handle one job. So putting 
+	everything in a single rule saves time from repeated staging because we only have to do it once per sample.
+	"""
+	input:
+		ref_fa = ref_fa,
+		ref_regions = ref_regions,
+		cghub_key = 'shared/cghub.key',
+		credentials_key = 'shared/credentials.key'
+	output: "shared/completed/{uuid}"
+	threads: 8
+	benchmark: "shared/benchmarks/run_wgs.{uuid}"
+	run:
+		# stage bam from cghub
+		max_children = threads * 4
+		shell('time gtdownload --path scratch \
+		                       --max-children {max_children} \
+		                       --credential-file {input.cghub_key} \
+		                       --verbose-incr \
+		                       {wildcards.uuid}')
+		
+		# move and change names for bam
+		dir_bam = '/'.join(['scratch', wildcards.uuid])
+		for f in os.listdir(dir_bam):
+			(basename, ext) = os.path.splitext(f)
+			move_from = '/'.join([dir_bam, f])
+			move_to = move_from
+			if ext == '.bam': move_to = '/'.join(['scratch', wildcards.uuid + '.bam'])
+			if ext == '.bai': move_to = '/'.join(['scratch', wildcards.uuid + '.bam.bai'])
+			shutil.move(move_from, move_to)
+
+		# call snps and indels with freebayes using parallel
+		shell('time freebayes-parallel {input.ref_regions} {threads} -f {input.ref_fa} scratch/{wildcards.uuid}.bam > scratch/{wildcards.uuid}.freebayes.vcf')
+		shell('time pigz --processes {threads} scratch/{wildcards.uuid}.freebayes.vcf')
+
+		# call sv with delly using parallel
+		shell('time parallel delly -t {{}} -o scratch/{wildcards.uuid}.delly.{{}}.vcf -m 8 -g {input.ref_fa} scratch/{wildcards.uuid}.bam ::: DEL DUP INV TRA INS')
+
+		# upload VCFs to s3
+		shell('time s4cmd put scratch/*.vcf.gz s3://chop-aws-genomics/TARGET/AML/WGS/{wildcards.uuid}/vcfs/')
+		shell('time s4cmd put scratch/*.vcf s3://chop-aws-genomics/TARGET/AML/WGS/{wildcards.uuid}/vcfs/')
+
+		# touch to finish
+		shell('echo finished > {output}')
+		shell('s4cmd put {output} s3://chop-aws-genomics/TARGET/run_logs/wgs/completed/')
+
+		# additional workflow step to upload bam to Cavatica
+		shell('time s4cmd --force -p {input.credentials_key} put scratch/{wildcards.uuid}.bam.bai s3://cavatica.01.raw/AML_TARGET_CGhub/')
+		shell('time s4cmd --force -p {input.credentials_key} put scratch/{wildcards.uuid}.bam s3://cavatica.01.raw/AML_TARGET_CGhub/')
+
+		# clean up
+		shell('rm -rf scratch/{wildcards.uuid}*')
+
+rule get_ref:
+	"""
+	Download and build reference data.
+	"""
+	output:
+		ref_fa = ref_fa,
+		ref_fai = ref_fai,
+		ref_regions = ref_regions
+	threads: 1
+	benchmark: 'shared/benchmarks/get_ref.txt'
+	shell:
+		"""
+		wget {ref_fa_gzipped_url} --output-document={ref_fa_gzipped}
+		gzip --decompress --to-stdout {ref_fa_gzipped} > {output.ref_fa}
+		sed -i 's/^>MT/>M/; /^>[0-9|X|Y|M]/s/^>/>chr/' {output.ref_fa}
+		samtools faidx {output.ref_fa}
+		fasta_generate_regions.py {output.ref_fai} {ref_regions_len} | grep 'chr[0-9|X|Y|M]' > {output.ref_regions}
+		rm {ref_fa_gzipped}
+		"""
+
+rule qc:
+	"""
+	Run QC procedures using Complete Genomics public data (NA12878).
+
+	Note:
+		- move volume to at least 100GB
+	"""
+	shell:
+		"""
+		time s4cmd get s3://1000genomes/technical/working/20101201_cg_NA12878/NA12878.cg.bam /scratch/NA12878.cg.bam
+		time s4cmd get s3://1000genomes/technical/working/20101201_cg_NA12878/Homo_sapiens_assembly18.fasta /scratch/Homo_sapiens_assembly18.fasta
+		samtools faidx /scratch/Homo_sapiens_assembly18.fasta
+		fasta_generate_regions.py /scratch/Homo_sapiens_assembly18.fasta 100000 | grep -v 'random' > /scratch/Homo_sapiens_assembly18.fasta.regions
+		time freebayes-parallel /scratch/Homo_sapiens_assembly18.fasta.regions 8 -f /scratch/Homo_sapiens_assembly18.fasta /scratch/NA12878.cg.bam > /scratch/freebayes.vcf
+		"""
+
+rule start_cluster:
+	"""
+	Start a cluster on AWS using cfncluster.
+	http://cfncluster.readthedocs.org/en/latest/
+
+	Usage: snakemake start_cluster
+
+	Log can be found at ~/.cfncluster/cfncluster-cli.log
+	"""
+	input:
+		config = 'configs/cfncluster/config',
+		post_install = 'configs/cfncluster/post_install.sh'
+	params:
+		cluster_name = 'target',
+		actcode = '26060-7260600616',
+		owner = 'Eric Lim',
+		description = 'TARGET WGS Variant Calling',
+		s3_post_install_loc = 's3://aplenc-aws/projects/target/wgs/configs/cfncluster/'
+	run:
+		# upload post_install scripts to s3 and change permission to public
+		s3_post_install_loc = '/'.join([os.path.dirname(params.s3_post_install_loc), os.path.basename(input.post_install)])
+		shell("s3cmd put {input.post_install} {params.s3_post_install_loc} --force")
+		shell("s3cmd setacl {s3_post_install_loc} --acl-public")
+
+		# define tags as a dict string for instances in the cluster
+		# cfncluster uses this awkward way to tag instances via command line
+		tags = str({
+			"billing:actcode": params.actcode,
+			"billing:owner": params.owner,
+			"billing:description": params.description
+		}).replace("'", '"')
+
+		# run cfncluster
+		shell("cfncluster --config {input.config} create {params.cluster_name} --tags '{tags}'")
+
+rule stop_cluster:
+	"""
+	Stop a running cluster.
+
+	Usage: snakemake stop_cluster
+	"""
+	input:
+		cghub_key = 'configs/cghub/cghub.key'
+	params:
+		cluster_name = 'target'
+	run:
+		shell("cfncluster delete {params.cluster_name}")
