@@ -5,7 +5,7 @@ foreach $f(@file){
     @n=split(/\./,$n[1]);
     while(<A>){
 	@a=split(/\s+/,$_);
-	if($a[1]<1E-2){
+	if(($a[1]<1E-2)&&($a[1]>0)){
 	    print "$n[0]\t$_";
 	}
     }

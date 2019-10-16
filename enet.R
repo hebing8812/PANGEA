@@ -1,5 +1,6 @@
 library("elasticnet");
 library("hdi");
+options(warn=-1);
 
 a=read.table("Obe.txt");
 b=read.table("Pre.txt");
@@ -10,4 +11,4 @@ if(dim(e$beta.pure)[1]>10){s=6;}
 l=lasso.proj(b.m,a[,1],betainit=e$beta.pure[s,],sigma=1);
 
 o=cbind(e$beta.pure[s,],l$pval.corr);
-write.table(o,"y.txt",col.names=F,row.names=F,sep='\t');
+write.table(l$pval.corr,"y.txt",col.names=F,row.names=F,sep='\t');

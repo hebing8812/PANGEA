@@ -80,9 +80,9 @@ while(<B>){
 	}
     }
     
-    print "$s1 $s2 $s3\n";
+#    print "$s1 $s2 $s3\n";
     
-    if($s1>=3){
+    if($s1>=2){
 	open(F,">out.txt");
 	foreach $i(@nn){
 	    if(exists $g{$i}){
@@ -97,7 +97,7 @@ while(<B>){
 	system("mv tmp Pre.txt");
     }
    
-    if($s2>=3){
+    if($s2>=4){
         open(F,">out.txt");
 	foreach $i(@nn){
             if(exists $k{$i}){
@@ -112,7 +112,7 @@ while(<B>){
 	system("mv tmp Pre.txt");
     }
 
-    if($s3>=2){
+    if($s3>=4){
         open(F,">out.txt");
 	foreach $i(@nn){
             if(exists $j{$i}){
